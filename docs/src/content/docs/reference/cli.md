@@ -297,7 +297,7 @@ Output carries `scope: machine`, the `daemon` state, the number of registered `r
 | `stage`    | Current step and its state, such as `review:running` or `review:awaiting_approval`; empty before the first step starts        |
 | `activity` | `parked <duration>` while the run waits for its driving agent, otherwise the active step's latest recorded activity          |
 | `pr`       | PR URL once one has been published                                                                                          |
-| `checks`   | `passed`, `no-ci` for a trusted [`no_ci`](/no-mistakes/reference/repo-config/#no_ci) declaration, `monitoring` while the CI step runs, and empty before CI records readiness |
+| `checks`   | `passed`, `no-ci` for a trusted [`no_ci`](/no-mistakes/reference/repo-config/#no_ci) declaration, and empty before CI records readiness; a CI step that is still running is reported by `stage` |
 
 Rows are grouped by repository root, newest-first inside each group.
 Terminal runs are never listed; inspect one with `no-mistakes axi status --run <id>`.

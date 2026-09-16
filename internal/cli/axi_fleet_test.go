@@ -148,6 +148,10 @@ func TestAxiFleetReportsEveryActiveRunAcrossRepositories(t *testing.T) {
 
 	first := startedRun(t, database, alpha.ID, "feature/one", "aaaaaaaaaaaa")
 	second := startedRun(t, database, alpha.ID, "feature/two", "bbbbbbbbbbbb")
+	runningStep(t, database, second.ID, types.StepCI)
+	if err := database.SetRunCIReady(second.ID, true); err != nil {
+		t.Fatalf("record CI readiness: %v", err)
+	}
 	third := startedRun(t, database, beta.ID, "feature/three", "cccccccccccc")
 	runningStep(t, database, third.ID, types.StepCI)
 	if err := database.UpdateRunPRURL(third.ID, "https://example.test/pr/7"); err != nil {
@@ -189,12 +193,19 @@ func TestAxiFleetReportsEveryActiveRunAcrossRepositories(t *testing.T) {
 	if secondRow.Repo != alphaPath || secondRow.Branch != "feature/two" {
 		t.Fatalf("second run row = %+v, want repo %s branch feature/two", secondRow, alphaPath)
 	}
+	// Recorded readiness is the only thing the checks column reports, and it
+	// reports it while the CI step keeps monitoring the open PR.
+	if secondRow.Stage != "ci:running" || secondRow.Checks != "passed" {
+		t.Fatalf("second run row = %+v, want stage ci:running and checks passed", secondRow)
+	}
 	thirdRow := fleetRowFor(t, doc, third.ID)
 	if thirdRow.Repo != betaPath || thirdRow.PR != "https://example.test/pr/7" {
 		t.Fatalf("third run row = %+v, want repo %s with its PR URL", thirdRow, betaPath)
 	}
-	if thirdRow.Stage != "ci:running" || thirdRow.Checks != "monitoring" {
-		t.Fatalf("third run row = %+v, want stage ci:running and checks monitoring", thirdRow)
+	// A CI step that is running but has recorded no readiness yet is live
+	// activity, which stage already carries; checks must not restate it.
+	if thirdRow.Stage != "ci:running" || thirdRow.Checks != "" {
+		t.Fatalf("third run row = %+v, want stage ci:running and empty checks", thirdRow)
 	}
 
 	// Rows are grouped by repository root so a dashboard renders them without

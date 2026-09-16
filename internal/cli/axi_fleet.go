@@ -8,7 +8,6 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/spf13/cobra"
 )
 
@@ -148,7 +147,7 @@ func fleetRows(env *axiEnv, repos []*db.Repo, runs []*db.Run) ([]fleetRow, int, 
 			Stage:    fleetStage(rv),
 			Activity: fleetActivity(rv),
 			PR:       rv.PRURL,
-			Checks:   fleetChecks(run, rv),
+			Checks:   fleetChecks(run),
 		})
 		repoIDs[run.RepoID] = struct{}{}
 	}
@@ -183,21 +182,13 @@ func fleetActivity(rv runView) string {
 
 // fleetChecks reports the run's recorded check outcome. Only persisted
 // readiness counts, so a run that has not reached CI reports nothing rather
-// than an assumed pass.
-func fleetChecks(run *db.Run, rv runView) string {
+// than an assumed pass; live CI activity is the stage column's to report.
+func fleetChecks(run *db.Run) string {
 	if run.CIReadyAt != nil {
 		if run.CIReadyNoCI {
 			return "no-ci"
 		}
 		return "passed"
-	}
-	for _, step := range rv.Steps {
-		if step.Name != string(types.StepCI) {
-			continue
-		}
-		if step.Status == string(types.StepStatusRunning) || step.Status == string(types.StepStatusFixing) {
-			return "monitoring"
-		}
 	}
 	return ""
 }
