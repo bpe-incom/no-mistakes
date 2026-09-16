@@ -84,7 +84,6 @@ func runAxiFleet(cmd *cobra.Command) error {
 	fields := []toon.Field{
 		{Key: "scope", Value: "machine"},
 		{Key: "daemon", Value: daemonState},
-		{Key: "repositories", Value: len(repos)},
 		{Key: "count", Value: fmt.Sprintf("%d active, %d parked, in %d of %d repositories", len(rows), parked, reposWithRuns, len(repos))},
 	}
 	if len(rows) == 0 {

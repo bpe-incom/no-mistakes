@@ -21,22 +21,20 @@ import (
 // fleetDoc is the machine-readable shape a dashboard parses out of
 // `axi fleet` when at least one run is active.
 type fleetDoc struct {
-	Scope        string     `toon:"scope"`
-	Daemon       string     `toon:"daemon"`
-	Repositories int        `toon:"repositories"`
-	Count        string     `toon:"count"`
-	Fleet        []fleetRow `toon:"fleet"`
-	Help         []string   `toon:"help"`
+	Scope  string     `toon:"scope"`
+	Daemon string     `toon:"daemon"`
+	Count  string     `toon:"count"`
+	Fleet  []fleetRow `toon:"fleet"`
+	Help   []string   `toon:"help"`
 }
 
 // emptyFleetDoc omits the fleet key, which carries a plain sentence rather than
 // a table when nothing is active.
 type emptyFleetDoc struct {
-	Scope        string   `toon:"scope"`
-	Daemon       string   `toon:"daemon"`
-	Repositories int      `toon:"repositories"`
-	Count        string   `toon:"count"`
-	Help         []string `toon:"help"`
+	Scope  string   `toon:"scope"`
+	Daemon string   `toon:"daemon"`
+	Count  string   `toon:"count"`
+	Help   []string `toon:"help"`
 }
 
 func axiFleetOutput(t *testing.T) string {
@@ -171,9 +169,6 @@ func TestAxiFleetReportsEveryActiveRunAcrossRepositories(t *testing.T) {
 
 	if doc.Scope != "machine" {
 		t.Fatalf("scope = %q, want machine:\n%s", doc.Scope, out)
-	}
-	if doc.Repositories != 2 {
-		t.Fatalf("repositories = %d, want 2:\n%s", doc.Repositories, out)
 	}
 	if len(doc.Fleet) != 3 {
 		t.Fatalf("fleet listed %d runs, want the 3 active ones:\n%s", len(doc.Fleet), out)

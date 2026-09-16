@@ -286,7 +286,7 @@ Like the other read-only AXI queries it reads the daemon's persisted state rathe
 The view is strictly read-only: it never starts, answers, aborts, reruns, synchronizes, or otherwise mutates a run.
 Every repository-scoped command keeps its existing behavior; nothing about `axi`, `axi status`, or `axi logs` changes because this view exists.
 
-Output carries `scope: machine`, the `daemon` state, the number of registered `repositories`, a `count` line, and a `fleet` table with one row per active run:
+Output carries `scope: machine`, the `daemon` state, a `count` line, and a `fleet` table with one row per active run:
 
 | Column     | Value                                                                                                                       |
 | ---------- | --------------------------------------------------------------------------------------------------------------------------- |
