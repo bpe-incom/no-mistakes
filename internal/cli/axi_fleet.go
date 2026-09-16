@@ -117,16 +117,18 @@ func fleetHelp(daemonState string, parked int) []string {
 // root so a dashboard can group by repository without re-sorting. It also
 // returns how many distinct repositories are represented.
 func fleetRows(env *axiEnv, repos []*db.Repo, runs []*db.Run) ([]fleetRow, int, error) {
-	byID := make(map[string]*db.Repo, len(repos))
+	// A run launched from a linked worktree resolves to its main repository
+	// when the run is recorded, so this root is the one a dashboard groups by.
+	rootByRepoID := make(map[string]string, len(repos))
 	for _, repo := range repos {
-		byID[repo.ID] = repo
+		rootByRepoID[repo.ID] = repo.WorkingPath
 	}
 	// GetActiveRuns already orders newest-first; a stable sort by repository
 	// root keeps that order inside each group.
 	ordered := make([]*db.Run, len(runs))
 	copy(ordered, runs)
 	sort.SliceStable(ordered, func(i, j int) bool {
-		return fleetRepoPath(byID, ordered[i]) < fleetRepoPath(byID, ordered[j])
+		return rootByRepoID[ordered[i].RepoID] < rootByRepoID[ordered[j].RepoID]
 	})
 
 	rows := make([]fleetRow, 0, len(ordered))
@@ -139,7 +141,7 @@ func fleetRows(env *axiEnv, repos []*db.Repo, runs []*db.Run) ([]fleetRow, int, 
 		rv := runViewFromDB(run, steps, env.d)
 		annotateRunView(env, &rv)
 		rows = append(rows, fleetRow{
-			Repo:     fleetRepoPath(byID, run),
+			Repo:     rootByRepoID[run.RepoID],
 			Branch:   run.Branch,
 			Run:      run.ID,
 			Status:   rv.Status,
@@ -151,19 +153,6 @@ func fleetRows(env *axiEnv, repos []*db.Repo, runs []*db.Run) ([]fleetRow, int, 
 		repoIDs[run.RepoID] = struct{}{}
 	}
 	return rows, len(repoIDs), nil
-}
-
-// fleetRepoPath is the registered repository root a run belongs to. A run
-// launched from a linked worktree reports that same root, because worktrees
-// resolve to their main repository when the run is recorded.
-func fleetRepoPath(byID map[string]*db.Repo, run *db.Run) string {
-	if repo, ok := byID[run.RepoID]; ok && repo != nil {
-		return repo.WorkingPath
-	}
-	// An active run is never dropped from the fleet just because its
-	// repository registration is gone. The marker keeps it visible and is
-	// unmistakably not a path.
-	return fmt.Sprintf("<unregistered repo %s>", run.RepoID)
 }
 
 // fleetStage names what the run is doing now: the gate it is parked at, else
