@@ -3,17 +3,20 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/spf13/cobra"
 	toon "github.com/toon-format/toon-go"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -73,7 +76,19 @@ func fleetRowFor(t *testing.T, doc fleetDoc, runID string) fleetRow {
 // repository, so each test registers exactly the repositories it needs.
 func setupFleetHome(t *testing.T) (*paths.Paths, *db.DB) {
 	t.Helper()
-	nmHome := t.TempDir()
+	return setupFleetHomeAt(t, t.TempDir())
+}
+
+// setupFleetHomeHostingAnEndpoint keeps NM_HOME under a short temp root, so a
+// test that binds the daemon's IPC endpoint there fits the platform's socket
+// path limit.
+func setupFleetHomeHostingAnEndpoint(t *testing.T) (*paths.Paths, *db.DB) {
+	t.Helper()
+	return setupFleetHomeAt(t, makeSocketSafeTempDir(t))
+}
+
+func setupFleetHomeAt(t *testing.T, nmHome string) (*paths.Paths, *db.DB) {
+	t.Helper()
 	t.Setenv("NM_HOME", nmHome)
 	p := paths.WithRoot(nmHome)
 	if err := p.EnsureDirs(); err != nil {
@@ -350,6 +365,113 @@ func TestAxiFleetIsReadOnly(t *testing.T) {
 	if _, err := os.Stat(p.Socket()); err == nil {
 		t.Fatalf("axi fleet started the daemon: socket %s exists", p.Socket())
 	}
+}
+
+// TestAxiFleetDaemonStateFollowsTheProbe covers the degraded case a
+// machine-wide observer must not be misled by. The same live endpoint is
+// probed twice: while it answers the health call the view reports a running
+// daemon, and once it accepts the connection but stops answering the view must
+// report the state as unknown - surfacing the probe failure instead of
+// claiming a stopped daemon whose rows are merely the last persisted state.
+func TestAxiFleetDaemonStateFollowsTheProbe(t *testing.T) {
+	p, database := setupFleetHomeHostingAnEndpoint(t)
+	root := t.TempDir()
+	_, repo := registerGitRepo(t, database, root, "stuck", "repo-stuck")
+	active := startedRun(t, database, repo.ID, "feature/stuck", "444444444444")
+	runningStep(t, database, active.ID, types.StepReview)
+
+	answering := serveHealth(t, p)
+	waitForDaemonRunning(t, p)
+	chdir(t, t.TempDir())
+
+	runningOut := axiFleetOutput(t)
+	runningDoc := decodeFleetDoc(t, runningOut)
+	if runningDoc.Daemon != "running" {
+		t.Fatalf("daemon = %q while the endpoint answers health, want running:\n%s", runningDoc.Daemon, runningOut)
+	}
+
+	answering.Store(false)
+	out := axiFleetOutput(t)
+	doc := decodeFleetDoc(t, out)
+
+	if doc.Daemon != "unknown" {
+		t.Fatalf("daemon = %q with an endpoint that never answers, want unknown:\n%s", doc.Daemon, out)
+	}
+	help := strings.Join(doc.Help, "\n")
+	if !strings.Contains(help, "probe did not conclude") || !strings.Contains(help, "did not reply") {
+		t.Fatalf("an unprobable daemon must be reported as such, with its probe error:\n%s", out)
+	}
+	if strings.Contains(help, "last persisted state") {
+		t.Fatalf("an unprobable daemon must not be reported as a stopped one:\n%s", out)
+	}
+	// The rows are the persisted state either way, and stay readable.
+	if row := fleetRowFor(t, doc, active.ID); row.Stage != "review:running" {
+		t.Fatalf("active run row = %+v, want review:running", row)
+	}
+}
+
+// TestAxiFleetReportsACrashedDaemonAsStopped is the other half of the same
+// distinction: a daemon that dies without cleanup leaves its endpoint on disk,
+// and nothing answers there. That is a conclusion, not a failed probe, so it
+// must still read as a stopped daemon whose rows are the last persisted state.
+func TestAxiFleetReportsACrashedDaemonAsStopped(t *testing.T) {
+	p, database := setupFleetHomeHostingAnEndpoint(t)
+	root := t.TempDir()
+	_, repo := registerGitRepo(t, database, root, "crashed", "repo-crashed")
+	active := startedRun(t, database, repo.ID, "feature/crashed", "555555555555")
+	runningStep(t, database, active.ID, types.StepReview)
+
+	if err := os.WriteFile(p.Socket(), []byte("leftover endpoint from a killed daemon"), 0o600); err != nil {
+		t.Fatalf("leave a stale endpoint: %v", err)
+	}
+
+	chdir(t, t.TempDir())
+	out := axiFleetOutput(t)
+	doc := decodeFleetDoc(t, out)
+
+	if doc.Daemon != "stopped" {
+		t.Fatalf("daemon = %q with a leftover endpoint nothing answers, want stopped:\n%s", doc.Daemon, out)
+	}
+	if !strings.Contains(strings.Join(doc.Help, "\n"), "last persisted state") {
+		t.Fatalf("a stopped-daemon fleet view must label its rows as persisted state:\n%s", out)
+	}
+	if row := fleetRowFor(t, doc, active.ID); row.Stage != "review:running" {
+		t.Fatalf("active run row = %+v, want review:running", row)
+	}
+}
+
+// serveHealth serves the real IPC health method on the daemon's endpoint. The
+// returned switch decides whether a probe is answered: turned off, the
+// connection is still accepted and then left hanging, which is what a live but
+// wedged daemon looks like to the probe.
+func serveHealth(t *testing.T, p *paths.Paths) *atomic.Bool {
+	t.Helper()
+	answering := &atomic.Bool{}
+	answering.Store(true)
+	blocked := make(chan struct{})
+
+	server := ipc.NewServer()
+	server.Handle(ipc.MethodHealth, func(ctx context.Context, _ json.RawMessage) (interface{}, error) {
+		if answering.Load() {
+			return &ipc.HealthResult{Status: "ok"}, nil
+		}
+		select {
+		case <-blocked:
+		case <-ctx.Done():
+		}
+		return &ipc.HealthResult{Status: "ok"}, nil
+	})
+	if err := server.Listen(p.Socket()); err != nil {
+		t.Fatalf("listen on the daemon endpoint: %v", err)
+	}
+	served := make(chan error, 1)
+	go func() { served <- server.ServeReady() }()
+	t.Cleanup(func() {
+		close(blocked)
+		server.Close()
+		<-served
+	})
+	return answering
 }
 
 // runSnapshot serializes the state a fleet read must leave untouched.

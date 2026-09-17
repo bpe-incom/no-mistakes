@@ -8,6 +8,8 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/spf13/cobra"
 )
 
@@ -56,10 +58,7 @@ func runAxiFleet(cmd *cobra.Command) error {
 	}
 	defer env.close()
 
-	daemonState := "stopped"
-	if alive, _ := daemon.IsRunning(env.p); alive {
-		daemonState = "running"
-	}
+	daemonState, probeErr := fleetDaemonState(env.p)
 
 	repos, err := env.d.GetRepos()
 	if err != nil {
@@ -91,13 +90,33 @@ func runAxiFleet(cmd *cobra.Command) error {
 	} else {
 		fields = append(fields, toon.Field{Key: "fleet", Value: rows})
 	}
-	fields = append(fields, toon.Field{Key: "help", Value: fleetHelp(daemonState, parked)})
+	fields = append(fields, toon.Field{Key: "help", Value: fleetHelp(daemonState, probeErr, parked)})
 
 	emitDoc(cmd, fields...)
 	return nil
 }
 
-func fleetHelp(daemonState string, parked int) []string {
+// fleetDaemonState reports what the health probe actually established. A probe
+// that timed out established nothing: the endpoint is there, taking the dial or
+// the health call without answering it, so the daemon may well be live and
+// still moving these runs. Calling that stopped would tell a machine-wide
+// observer the rows are merely the last persisted state and swallow the probe
+// error, so it is reported as unknown carrying that error instead. Every other
+// outcome is a conclusion, including the refused dial a crashed daemon's
+// leftover endpoint gives: nothing is serving it.
+func fleetDaemonState(p *paths.Paths) (state string, probeErr string) {
+	alive, err := daemon.IsRunning(p)
+	switch {
+	case alive:
+		return "running", ""
+	case ipc.IsConnectTimeout(err), ipc.IsCallTimeout(err):
+		return "unknown", err.Error()
+	default:
+		return "stopped", ""
+	}
+}
+
+func fleetHelp(daemonState, probeErr string, parked int) []string {
 	help := []string{
 		"This view is read-only and machine-wide: it never starts, answers, aborts, reruns, or synchronizes a run",
 		"Run `no-mistakes axi status --run <id>` to inspect one listed run in detail; that selection is inspection-only",
@@ -105,8 +124,11 @@ func fleetHelp(daemonState string, parked int) []string {
 	if parked > 0 {
 		help = append(help, "A parked run is waiting for its own driving agent, not stalled; answer its gate with `no-mistakes axi respond` from a worktree on that run's branch")
 	}
-	if daemonState != "running" {
+	switch daemonState {
+	case "stopped":
 		help = append(help, "The daemon is not running, so these rows are the last persisted state; it reconciles runs it no longer owns when it next starts")
+	case "unknown":
+		help = append(help, "The daemon health probe did not conclude, so whether these rows are live or stale is unknown: "+probeErr)
 	}
 	return help
 }

@@ -305,7 +305,9 @@ When nothing is active, `fleet` is the sentence `no active or parked runs on thi
 
 `count` reports how many runs are active, how many of those are parked, and in how many of the registered repositories they sit.
 A parked row is waiting for its own driving agent rather than stalled; answer its gate with `no-mistakes axi respond` from a worktree on that run's branch, since `axi fleet` itself cannot respond.
-When the daemon is stopped, the rows are the last persisted state and the help says so; [Daemon & Worktrees](/no-mistakes/concepts/daemon/#crash-recovery) owns what the daemon does with those runs when it next starts.
+`daemon` is `running`, `stopped`, or `unknown`.
+When it is stopped, the rows are the last persisted state and the help says so; [Daemon & Worktrees](/no-mistakes/concepts/daemon/#crash-recovery) owns what the daemon does with those runs when it next starts.
+`unknown` means the health probe timed out rather than concluding - the daemon may be live and still moving these runs - and the help carries the probe error.
 
 ## no-mistakes axi sync
 
