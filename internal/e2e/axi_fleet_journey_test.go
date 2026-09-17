@@ -470,3 +470,135 @@ func resolvedPath(t *testing.T, dir string) string {
 	}
 	return resolved
 }
+
+// TestAxiFleetReportsPublishedPRAndCheckReadiness drives a real pipeline past
+// publication and into CI monitoring, so the fleet view's `pr` and `checks`
+// columns are filled by the pipeline itself rather than by the observer. The
+// repository declares `no_ci: true` on its trusted default branch, which is
+// the one case where an empty forge result is recorded as readiness, so the
+// run stays alive at `ci:running` with a published PR while the fleet is read.
+func TestAxiFleetReportsPublishedPRAndCheckReadiness(t *testing.T) {
+	h := NewHarness(t, SetupOpts{Agent: "claude"})
+
+	const (
+		giteaHost  = "gitea.example.com"
+		repoSlug   = "owner/repo"
+		loginName  = "e2e"
+		remoteURL  = "https://" + giteaHost + "/" + repoSlug + ".git"
+		branchName = "feature/fleet-ci"
+	)
+
+	configureGitURLRewrite(t, h, remoteURL, h.UpstreamDir)
+	if out, err := h.runGit(t.Context(), h.WorkDir, "remote", "set-url", "origin", remoteURL); err != nil {
+		t.Fatalf("set forge origin: %v\n%s", err, out)
+	}
+	configureTeaLogin(t, h, giteaHost, loginName)
+	t.Setenv("FAKEAGENT_TEA_HOST", giteaHost)
+	// The PR stays open, so the CI step keeps monitoring instead of finishing
+	// the run the moment it observes a merge.
+	t.Setenv("FAKEAGENT_TEA_PR_STATE", "open")
+	declareNoCIOnDefaultBranch(t, h)
+
+	if out, err := h.Run("init"); err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+
+	outside := t.TempDir()
+	h.CommitChange(branchName, "fleet-ci.txt", "fleet ci change\n", "add fleet ci file")
+	h.PushToGate(branchName)
+
+	row := waitForFleetRow(t, h, outside, branchName, 120*time.Second, func(row fleetViewRow) bool {
+		return row.Checks != ""
+	})
+	t.Logf("=== FLEET TRANSCRIPT: a published run under CI monitoring ===\n%s", fleetOutput(t, h, outside))
+
+	if row.Repo != resolvedPath(t, h.WorkDir) {
+		t.Fatalf("row %+v: repo = %q, want the registered root", row, row.Repo)
+	}
+	if row.Status != string(types.RunRunning) || row.Stage != "ci:running" {
+		t.Fatalf("row %+v: want a running run at ci:running", row)
+	}
+	// The PR column must carry what the pipeline actually published.
+	wantPRPrefix := "http://" + giteaHost + "/" + repoSlug + "/pulls/"
+	if !strings.HasPrefix(row.PR, wantPRPrefix) {
+		t.Fatalf("row %+v: pr = %q, want a published PR URL under %s", row, row.PR, wantPRPrefix)
+	}
+	// The repository declared it has no CI, so that is what the checks column
+	// reports - never a plain "passed" that would claim checks actually ran.
+	if row.Checks != "no-ci" {
+		t.Fatalf("row %+v: checks = %q, want no-ci for a trusted no_ci declaration", row, row.Checks)
+	}
+	// A parked-for-a-decision row is what `activity` reports as a duration;
+	// this run is working, so it reports the CI step's own recorded activity.
+	if strings.HasPrefix(row.Activity, "parked ") || row.Activity == "" {
+		t.Fatalf("row %+v: activity = %q, want the CI step's recorded activity", row, row.Activity)
+	}
+
+	if out, err := h.Run("axi", "abort"); err != nil {
+		t.Fatalf("abort the monitored run: %v\n%s", err, out)
+	}
+}
+
+// waitForFleetRow polls the machine-wide view the way a dashboard would, until
+// the row for branch satisfies ready.
+func waitForFleetRow(t *testing.T, h *Harness, dir, branch string, timeout time.Duration, ready func(fleetViewRow) bool) fleetViewRow {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last string
+	for time.Now().Before(deadline) {
+		last = fleetOutput(t, h, dir)
+		for _, row := range decodeFleetView(t, last).Fleet {
+			if row.Branch == branch && ready(row) {
+				return row
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Fatalf("no fleet row for %s reached the expected state within %s; last view:\n%s", branch, timeout, last)
+	return fleetViewRow{}
+}
+
+// configureTeaLogin writes the tea config the Gitea provider is detected
+// through, in an isolated XDG_CONFIG_HOME so an ambient one cannot leak in.
+func configureTeaLogin(t *testing.T, h *Harness, host, login string) {
+	t.Helper()
+	xdgConfigHome := filepath.Join(h.HomeDir, ".config")
+	t.Setenv("XDG_CONFIG_HOME", xdgConfigHome)
+	teaConfigDir := filepath.Join(xdgConfigHome, "tea")
+	if err := os.MkdirAll(teaConfigDir, 0o755); err != nil {
+		t.Fatalf("mkdir tea config dir: %v", err)
+	}
+	teaConfig := "logins:\n" +
+		"    - name: " + login + "\n" +
+		"      url: https://" + host + "\n" +
+		"      ssh_host: " + host + "\n" +
+		"      user: e2e-tea-user\n" +
+		"      token: xxx\n"
+	if err := os.WriteFile(filepath.Join(teaConfigDir, "config.yml"), []byte(teaConfig), 0o644); err != nil {
+		t.Fatalf("write tea config: %v", err)
+	}
+}
+
+// declareNoCIOnDefaultBranch commits the trusted `no_ci: true` declaration to
+// the default branch, which is the only place the CI step accepts it from.
+func declareNoCIOnDefaultBranch(t *testing.T, h *Harness) {
+	t.Helper()
+	ctx := context.Background()
+	configPath := filepath.Join(h.WorkDir, ".no-mistakes.yaml")
+	existing, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read repo config: %v", err)
+	}
+	if err := os.WriteFile(configPath, append(existing, []byte("no_ci: true\n")...), 0o644); err != nil {
+		t.Fatalf("write repo config: %v", err)
+	}
+	for _, args := range [][]string{
+		{"add", ".no-mistakes.yaml"},
+		{"commit", "-m", "declare that this repository has no CI"},
+		{"push", "origin", "main"},
+	} {
+		if out, err := h.runGit(ctx, h.WorkDir, args...); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+}
